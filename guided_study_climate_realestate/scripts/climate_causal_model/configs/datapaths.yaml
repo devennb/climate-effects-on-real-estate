@@ -1,0 +1,14 @@
+databases: 
+  duckdb_location_redfin: ../../datasets/combined_data2.db
+  duckdb_location_zillow: ../../datasets/combined_data.db
+datasets: 
+  ZCTA_geo_datapath: ../../datasets/State-zip-code-GeoJSON/*.json
+  claims_data_path: ../../datasets/Flood-insurance/FimaNfipClaims.csv
+  redfin_data_path:  ../../datasets/Zillow-home-prices/zip_code_market_tracker.tsv000
+  zillow_data_path: ../../datasets/Zillow-home-prices/zillow_realestate_ts_zip.csv
+  irs_data_path: ../../datasets/Demographics/22irs.csv
+  zip_geos_pd: json_to_dfs_no_geom
+apis: 
+  FRED_api_endpoint: https://api.stlouisfed.org/fred/series/observations
+  FRED_api_key: 8fd9759bac0caf671d3462eed0b34d68
+
