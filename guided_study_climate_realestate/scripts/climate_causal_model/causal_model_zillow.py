@@ -17,6 +17,8 @@ import logging
 
 from data_loader import DataLoaderZillow #adjust this later...
 
+############### DEPRECATED USE REDFIN DATA+MODEL INSTEAD #################
+
 warnings.filterwarnings('ignore')
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('ZILLOW MODEL')

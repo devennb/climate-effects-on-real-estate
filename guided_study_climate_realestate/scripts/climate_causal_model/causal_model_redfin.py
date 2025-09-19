@@ -23,7 +23,23 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('REDFIN MODEL')
 
 class DBLRedfin: 
+
+    '''
+    Doubly Robust Estimation Framework via Redfin Dataset
+    Eval causal effect of hurricanes/flooding disasters (via NFIP claims) on property values (Redfin), controlled for zip-level socioeconomic attributes 
+    Todo: see if this is feasible at the census tract level!
+    Inputs:
+        *state abbreviation: 1 Model per State
+        *window_size: size of the recovery window post disaster (months) to be considered in the risk regime (our treatment, inferred via the claims dataset)
+
+    '''
+
     def __init__(self, state, window_size=1):
+        '''
+        Runs the dataloader to retrieve state-specific dataset for the model (indexed by zip-code,month,year)
+        Assigns control/treatment groups via thresholding on claims/losses 
+        Adds recovery window into treatment groups
+        '''
 
         logger.info('Instantiating Data: Redfin-Model')
         dl = DataLoaderRedfin()
@@ -42,8 +58,13 @@ class DBLRedfin:
             mask = pd.concat([self.dataset.reset_index().groupby(['zip'])['risk_regime'].shift(i).bfill() for i in range(self.risk_window)], axis=1)
             mask.index = self.dataset.index
             self.dataset['risk_regime'] = mask.any(axis=1)          
-  
+
+        #retrieve controlled feats
+
+        #socio-demos
         irs_tax_return_feats = list(self.dataset.columns[:10])
+
+        #housing market
         housing_market_feats = [
             'HOMES_SOLD',
             'PENDING_SALES',
@@ -56,8 +77,10 @@ class DBLRedfin:
         self.ttl_feats = irs_tax_return_feats + housing_market_feats
         logger.info(f"Model Features: {','.join([str(i) for i in self.ttl_feats])}")
 
+        #define intervention + outcome vars. change me as needed 
         self.causal_intervention_variable = 'risk_regime'
         self.outcome_variable = 'MEDIAN_SALE_PRICE_MOM'
+
         logger.info(f'Outcome Variable: {self.outcome_variable}')
 
     def generate_propensity_score(self, class_weight=0.5):
@@ -73,6 +96,10 @@ class DBLRedfin:
         self.dataset['propensity_score'] = lr.predict_proba(X)[:,1]
 
     def generate_enhanced_propensity_score(self, scale_factor): 
+        '''
+        Propensity score correction for imbalanced samples per (@deven add paper citation here)
+        '''
+
         logger.info('Fitting the treatment model via the enhanced propensity scoring methodology')
         X = self.dataset[self.ttl_feats].values
         T = self.dataset[self.causal_intervention_variable].astype(bool)
@@ -85,7 +112,9 @@ class DBLRedfin:
         self.dataset['propensity_score'] = ps
 
     def isolate_causal_effect(self, plot=False):
-
+        '''
+        Calculates the causal effect (ATE) via doubly robust estimation
+        '''
         #run the outcome model... 
 
         logger.info('Fitting the Outcome Models')
@@ -93,6 +122,7 @@ class DBLRedfin:
 
         X = self.dataset[self.ttl_feats].values
 
+        #outcome modeling via simple linear regression
         ttl_dataset_0 = self.dataset.loc[self.dataset[self.causal_intervention_variable]==False].drop(columns=[self.causal_intervention_variable])
         X_0, y_0 = ttl_dataset_0[self.ttl_feats].values, ttl_dataset_0[self.outcome_variable]
         y_0m = LinearRegression() 
@@ -117,6 +147,8 @@ class DBLRedfin:
         logger.info('Generate ATE sampling distribution')
         diffs_dbl = self.dataset['treatment_effect']
         diffs_reg_only = self.dataset['treatment_effect_no_corr']
+
+        #create sample dist to estimate uncertainty of the ATE val, confidence intervals etc...
         bootstrapped_sample_dist_dbl = pd.Series([diffs_dbl.sample(n=len(diffs_dbl), replace=True).mean() for _ in np.arange(10000)])
        
         obs = diffs_dbl.mean()

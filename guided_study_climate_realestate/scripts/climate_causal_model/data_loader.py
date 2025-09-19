@@ -12,12 +12,22 @@ from configs import read_yaml_as_dict
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('DATALOADER')
 
+############### SCRIPT TO CLEAN + LOAD DATA SOURCES FOR CAUSAL MODEL ##############
+
 class DataLoaderRedfin: 
     
     def __init__(
             self, 
             data_config = read_yaml_as_dict()
         ): 
+
+        '''
+        Initializes DuckDB local database 
+        Processes NFIP claims, IRS tax return data, as well as property market insights (via Redfin's open dataset) into the db 
+        Also retrieves macroeconomic data from FRED (St. Louis Fed Reserve) API
+        Inputs: 
+            *data_config: a dictionary specifying file locations for static files, assumes default setup 
+        '''
 
         logger.info('Reading dataset file locations')
         datasets = data_config['datasets']
@@ -39,6 +49,13 @@ class DataLoaderRedfin:
             pass 
 
     def retrieve_state_data_snapshot(self, state):
+
+        '''
+        Concatenates all relevant data (from the DuckDB db) into an in-memomry pandas dataset, ready for model use 
+        Indexed by zipcode,month,year
+        Inputs: 
+            state: state abbrev., specifying what US state we're interested in retrieving data for 
+        '''
 
         logger.info(f'Retrieving Combined Dataset for State: {state}')
         assert hasattr(self, 'con')
@@ -102,6 +119,12 @@ class DataLoaderRedfin:
         
     def retrieve_macroeconomic_data(self):
 
+        '''
+        Function to retrieve macroeconomic trend data via FRED API
+        Includes short/long term smoothed mortgage rates, CPI, averaged disposable income 
+        Approximated on a nationwide basis, month over month
+        '''
+
         logger.info('Retrieving macroeconomic time-series datasets')
         if hasattr(self, 'macro_data'):
             return self.macro_data 
@@ -149,7 +172,16 @@ class DataLoaderRedfin:
     
 
     def initialize_ddb(self, config):
+
+        '''
+        Retrieves static files, processes them into a duckdb database (NFIP/IRS/Redfin)
+        Inputs: 
+            *config: a dictionary specifying file locations for static files, assumes default setup 
+        Returns a database connection to the said duckdb database
+        '''
+
         self.DUCKDB_location = config['databases']['duckdb_location_redfin']
+
         logger.info(f'Building local database at {self.DUCKDB_location}')
         if os.path.exists(self.DUCKDB_location): 
             return duckdb.connect(self.DUCKDB_location)
@@ -286,6 +318,12 @@ class DataLoaderRedfin:
         return con
     
 class DataLoaderZillow(DataLoaderRedfin):
+
+    '''
+    DEPRECATED: use the redfin data loader instead 
+    Keeping as reference 
+    Inherits from the redfin data loader class 
+    '''
 
     def retrieve_regional_data_snapshot(self, region_str, time_window_size=2):
         
