@@ -183,8 +183,8 @@ class DataLoaderRedfin:
         self.DUCKDB_location = config['databases']['duckdb_location_redfin']
 
         logger.info(f'Building local database at {self.DUCKDB_location}')
-        if os.path.exists(self.DUCKDB_location): 
-            return duckdb.connect(self.DUCKDB_location)
+      #  if os.path.exists(self.DUCKDB_location): 
+       #     return duckdb.connect(self.DUCKDB_location)
             
         base_query = '''
         drop table if exists nfip_claims
@@ -218,7 +218,7 @@ class DataLoaderRedfin:
             censusTract, 
             latitude, 
             longitude
-        from read_csv('{claims_data_path}', strict_mode=False)
+        from read_csv('{claims_data_path}')
         ;
 
         drop table if exists nfip_claims_zip 
@@ -274,7 +274,7 @@ class DataLoaderRedfin:
             A07230 as educationCreditTotal, 
             N85770 as returnsPremiumsCredit, ---aids in offsetting health insurance premiums
             A85770 as premiumsCreditTotal, 
-        from read_csv('{irs_data_path}', strict_mode=False)
+        from read_csv('{irs_data_path}')
         ;
     
         drop table if exists redfin_dataset
@@ -411,7 +411,7 @@ class DataLoaderZillow(DataLoaderRedfin):
             censusTract, 
             latitude, 
             longitude
-        from read_csv('{claims_data_path}', strict_mode=False)
+        from read_csv('{claims_data_path}')
         ;
 
         drop table if exists nfip_claims_zip 
@@ -465,7 +465,7 @@ class DataLoaderZillow(DataLoaderRedfin):
             A07230 as educationCreditTotal, 
             N85770 as returnsPremiumsCredit, ---aids in offsetting health insurance premiums
             A85770 as premiumsCreditTotal, 
-        from read_csv('{irs_data_path}', strict_mode=False)
+        from read_csv('{irs_data_path}')
         ;
     
         drop table if exists zillow_home_prices
