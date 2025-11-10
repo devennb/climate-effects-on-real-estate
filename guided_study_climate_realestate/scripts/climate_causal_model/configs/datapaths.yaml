@@ -5,7 +5,6 @@ datasets:
   ZCTA_geo_datapath: ../../datasets/State-zip-code-GeoJSON/*.json
   claims_data_path: ../../datasets/Flood-insurance/FimaNfipClaims.csv
   redfin_data_path:  ../../datasets/Zillow-home-prices/zip_code_market_tracker.tsv000
-  zillow_data_path: ../../datasets/Zillow-home-prices/zillow_realestate_ts_zip.csv
   irs_data_path: ../../datasets/Demographics/22irs.csv
   zip_geos_pd: json_to_dfs_no_geom
 apis: 

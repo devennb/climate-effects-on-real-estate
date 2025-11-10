@@ -42,7 +42,9 @@ class DataLoaderCensus(DataLoaderRedfin):
         ):
 
         #first do the standard workflow, initiate db connection
-        super().__init__(self, data_config)
+
+        print(data_config)
+        super().__init__(data_config)
 
         if len(census_features) == 0: #do all features 
             self.census_features = self.FEATURE_MAP
@@ -52,7 +54,7 @@ class DataLoaderCensus(DataLoaderRedfin):
             }
 
         
-    def retrieve_state_data_snapshot(self, state):
+    def retrieve_state_data_snapshot(self, state, table_name):
 
         logger.info(f'Retrieving Combined Dataset for State: {state}')
         assert hasattr(self, 'con')
@@ -68,8 +70,12 @@ class DataLoaderCensus(DataLoaderRedfin):
         
         logger.info('Gathering NFIP Claims/Losses data + Joining on Redfin Real Estate dataset')
         subqueryclaims_re = f'''
+         drop table if exists {table_name}_claims
+         ;
+
+         create table {table_name}_claims as
          with realestate_data as (
-         select * from redfin_dataset where STATE_CODE = 'FL'
+         select * from redfin_dataset where STATE_CODE = '{state}'
          )
          select 
             year, 
@@ -87,6 +93,9 @@ class DataLoaderCensus(DataLoaderRedfin):
          group by 1,2,3
          order by zip,year
          ;
+
+         select * from {table_name}_claims
+        ;
         '''
 
         claims_realestate = self.con.sql(subqueryclaims_re).df()
@@ -98,7 +107,18 @@ class DataLoaderCensus(DataLoaderRedfin):
         ttl = ttl.fillna(0)
 
         ttl['risk_regime'] = ttl['totalLossesZip'] > 0
-        
+
+        self.con.sql(
+        f'''
+        drop table if exists {table_name}
+        ;
+
+        create table {table_name} as 
+        select * from ttl
+        ;
+        '''
+        )
+
         return ttl
     
     def retrieve_census_data_by_state(self, state, tbl_name):
@@ -112,11 +132,12 @@ class DataLoaderCensus(DataLoaderRedfin):
             }
         )
 
-        years = np.arange(2015,2025)
+        years = np.arange(2021,2024)
         blocks_it = np.arange(0,len(zips),len(zips)//10)
         all_ = []
 
         for year in tqdm(years):
+            print(year)
             for idx, _ in list(enumerate(blocks_it))[:-1]:
 
                 i_start = blocks_it[idx]
@@ -129,13 +150,14 @@ class DataLoaderCensus(DataLoaderRedfin):
                 print(url_block)
 
                 response = requests.get(url_block, headers=headers)
+                print(response.status_code)
 
                 assert response.status_code == 200
     
                 data = response.json() 
 
                 values = data[1:]
-                columns = ['ZCTA'] + list(self.features.keys()) + ['ucgid']
+                columns = ['ZCTA'] + list(self.census_features.keys()) + ['ucgid']
                 tbl = pd.DataFrame(data=values,columns=columns)
                 tbl['year'] = int(year)
                 tbl['zip']=tbl['ZCTA'].str.strip('ZCTA5 ')
@@ -148,6 +170,9 @@ class DataLoaderCensus(DataLoaderRedfin):
         #option to save data as csv? 
         self.con.sql(
         f'''
+        drop table if exists {tbl_name}
+        ;
+
         create table {tbl_name} as 
         select * from data
         ;
@@ -155,5 +180,18 @@ class DataLoaderCensus(DataLoaderRedfin):
         )
 
         return data
+    
+if __name__ == '__main__':
+    obj = DataLoaderCensus()
+
+    state = 'FL'
+    t = obj.retrieve_state_data_snapshot(
+        state=state, 
+        table_name='fl_dataset'
+    )
+    print(t)
+    print(t['risk_regime'].value_counts())
+
+    pass 
 
 

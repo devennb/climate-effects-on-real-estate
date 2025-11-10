@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 from sklearn.linear_model import LinearRegression
 
 from data_loader import DataLoaderRedfin #adjust this later...
+from census_data_loader import DataLoaderCensus
 import warnings
 import logging
 
@@ -185,8 +186,116 @@ class DBLRedfin:
 
         return self.dataset, self.report
     
+class DBLRedfinCensus(DBLRedfin):
+   
+    def __init__(self, state):
+        '''
+        Runs the dataloader to retrieve state-specific dataset for the model (indexed by zip-code,month,year)
+        Assigns control/treatment groups via thresholding on claims/losses 
+        Adds recovery window into treatment groups
+        '''
+        logger.info('Instantiating Data: Redfin-Model')
+        dl = DataLoaderCensus()
+        self.state = state
+        self.dataset = dl.retrieve_state_data_snapshot(state=state, table_name=f'{state}census').drop_duplicates()
+      
+        self.census = list(dl.census_features.keys())
+
+       # dataset = dataset.copy()
+        feats = self.CENSUS + ['home_price']
+        for f in feats: 
+            self.dataset[f] = self.dataset[f].replace(0,0.001)
+            self.dataset[f] = self.dataset.groupby(['zip'])[f].diff() \
+                       / self.dataset.groupby(['zip'])[f].shift(1)
+            self.dataset[f] = self.dataset[f].clip(
+                upper=-3,lower=3
+            )
+
+        self.ttl_feats = self.census
+
+        #define intervention + outcome vars. change me as needed 
+        self.dataset = self.dataset.dropna()
+        
+        self.causal_intervention_variable = 'risk_regime'
+        self.outcome_variable = 'home_price'
+        self.state = state
+
+    def isolate_causal_effect(self, plot=False):
+        '''
+        Calculates the causal effect (ATE) via doubly robust estimation
+        '''
+        #run the outcome model... 
+
+        self.generate_enhanced_propensity_score(scale_factor=0.01)
+
+        X = self.dataset[self.ttl_feats].values
+
+        #outcome modeling via simple linear regression
+        ttl_dataset_0 = self.dataset.loc[self.dataset[self.causal_intervention_variable]==False].drop(columns=[self.causal_intervention_variable])
+        X_0, y_0 = ttl_dataset_0[self.ttl_feats].values, ttl_dataset_0[self.outcome_variable]
+        y_0m = LinearRegression() 
+        y_0m.fit(X_0, y_0)
+        y_0h = y_0m.predict(X)
+
+
+        ttl_dataset_1 = self.dataset.loc[self.dataset[self.causal_intervention_variable]==True].drop(columns=[self.causal_intervention_variable])
+        X_1, y_1 = ttl_dataset_1[self.ttl_feats].values, ttl_dataset_1[self.outcome_variable]
+        y_1m =  LinearRegression() 
+        y_1m.fit(X_1, y_1)
+        y_1h = y_1m.predict(X)
+
+
+        self.dataset['y_0'] = y_0h 
+        self.dataset['y_0_corrected'] = self.dataset['y_0'] + ((self.dataset[self.outcome_variable]-y_0h)/(1-self.dataset['propensity_score']))*(self.dataset[self.causal_intervention_variable].astype(np.int32)==0)
+        self.dataset['y_1'] = y_1h 
+        self.dataset['y_1_corrected'] = self.dataset['y_1'] + ((self.dataset[self.outcome_variable]-y_1h)/(self.dataset['propensity_score']))*(self.dataset[self.causal_intervention_variable].astype(np.int32)==1)
+        self.dataset['treatment_effect'] = self.dataset['y_1_corrected']-self.dataset['y_0_corrected']
+        self.dataset['treatment_effect_no_corr'] = self.dataset['y_1']-self.dataset['y_0']
+
+
+        diffs_dbl = self.dataset['treatment_effect']
+        diffs_reg_only = self.dataset['treatment_effect_no_corr']
+
+        #create sample dist to estimate uncertainty of the ATE val, confidence intervals etc...
+        bootstrapped_sample_dist_dbl = pd.Series([diffs_dbl.sample(n=len(diffs_dbl), replace=True).mean() for _ in np.arange(10000)])
+       
+        obs = diffs_dbl.mean()
+        obs_reg_only = diffs_reg_only.mean()
+        print(f"Average Treatment Effect, Flooding effects on house prices {self.state}: {obs}")
+        CI = [
+            bootstrapped_sample_dist_dbl.quantile(0.025), 
+            bootstrapped_sample_dist_dbl.quantile(0.975)
+        ]
+
+        self.report = {
+            'State': self.state, 
+           
+            'ATE Estimate': obs, 
+            'ATE Confidence Bounds (95 pct)': CI, 
+            'P-value': np.count_nonzero(bootstrapped_sample_dist_dbl > 0)/len(bootstrapped_sample_dist_dbl),
+            'Significant?': (np.count_nonzero(bootstrapped_sample_dist_dbl > 0)/len(bootstrapped_sample_dist_dbl)) < 0.06
+        }
+
+        if plot:
+
+            plt.hist(bootstrapped_sample_dist_dbl, bins=20, label='Doubly Robust Estimation')
+      
+            
+
+            plt.axvline(obs, label=f"Observed ATE: {obs}",color='red')
+
+            #plt.axvline(obs_reg_only, label=f"Observed ATE [No DRL Estimation]: {obs_reg_only}",color='orange')
+            plt.axvline(CI[0], label=f"95 pct CI Lower: {CI[0]}",color='red',linestyle='--')
+            plt.axvline(CI[1], label=f"95 pct CI Upper: {CI[1]}",color='red',linestyle='--')
+            plt.legend()
+            plt.show()
+
+        return self.dataset, self.report
+
+    pass
+    
 if __name__ == '__main__':
-     dbl = DBLRedfin(state='LA', window_size=6)
+     dbl = DBLRedfinCensus(state='SC')
      _, re = dbl.isolate_causal_effect()
      print(re)
 
