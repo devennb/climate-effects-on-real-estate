@@ -82,6 +82,7 @@ class DataLoaderCensus(DataLoaderRedfin):
             zip::INT as zip, 
             STATE_CODE, 
             avg(MEDIAN_SALE_PRICE::DOUBLE) as home_price, 
+            avg(HOMES_SOLD::DOUBLE) as homes_sold,
             sum(claimCounts) as claimCounts, 
             sum(numEvents) as numEvents, 
             sum(totalClaimZip) as totalClaimZip, 
@@ -132,7 +133,7 @@ class DataLoaderCensus(DataLoaderRedfin):
             }
         )
 
-        years = np.arange(2021,2024)
+        years = np.arange(2015,2024)
         blocks_it = np.arange(0,len(zips),len(zips)//10)
         all_ = []
 
@@ -144,7 +145,10 @@ class DataLoaderCensus(DataLoaderRedfin):
                 i_end = blocks_it[idx+1]
 
                 zips_block = zips.loc[i_start:i_end]
-                usgis_id_block = ','.join('860Z200US' + zips_block)
+                if year <= 2020: prefix = '8600000US'
+                else: prefix = '860Z200US'
+
+                usgis_id_block = ','.join(prefix + zips_block)
                 url_block = f'https://api.census.gov/data/{year}/acs/acs5?get=NAME,{var_codes}&ucgid={usgis_id_block}' 
 
                 print(url_block)

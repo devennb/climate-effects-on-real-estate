@@ -202,7 +202,7 @@ class DBLRedfinCensus(DBLRedfin):
         self.census = list(dl.census_features.keys())
 
        # dataset = dataset.copy()
-        feats = self.CENSUS + ['home_price']
+        feats = self.census + ['homes_sold','home_price']
         for f in feats: 
             self.dataset[f] = self.dataset[f].replace(0,0.001)
             self.dataset[f] = self.dataset.groupby(['zip'])[f].diff() \
@@ -295,8 +295,17 @@ class DBLRedfinCensus(DBLRedfin):
     pass
     
 if __name__ == '__main__':
-     dbl = DBLRedfinCensus(state='SC')
-     _, re = dbl.isolate_causal_effect()
-     print(re)
+    states = [
+         'NC','SC','GA','FL','AL','MS','LA','TX'
+    ]
+
+    outputs = []
+    for state in states: 
+        dbl = DBLRedfinCensus(state=state)
+        _, re = dbl.isolate_causal_effect()
+        outputs.append(re)
+
+    pd.DataFrame(data=outputs).to_csv('model_w_census.csv')
+
 
         
