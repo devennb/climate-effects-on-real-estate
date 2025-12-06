@@ -188,16 +188,19 @@ class DBLRedfin:
     
 class DBLRedfinCensus(DBLRedfin):
    
-    def __init__(self, state):
+    def __init__(self, query, query_type='state'):
         '''
         Runs the dataloader to retrieve state-specific dataset for the model (indexed by zip-code,month,year)
         Assigns control/treatment groups via thresholding on claims/losses 
         Adds recovery window into treatment groups
         '''
         logger.info('Instantiating Data: Redfin-Model')
+
+        assert query_type in ['msa','state']
+
         dl = DataLoaderCensus()
-        self.state = state
-        self.dataset = dl.retrieve_state_data_snapshot(state=state, table_name=f'{state}census').drop_duplicates()
+        self.state = query
+        self.dataset = dl.retrieve_state_data_snapshot(query, query_type, table_name=f'{self.state.split(',')[0].replace(' ','')}census').drop_duplicates()
       
         self.census = list(dl.census_features.keys())
 
@@ -211,14 +214,14 @@ class DBLRedfinCensus(DBLRedfin):
                 upper=-3,lower=3
             )
 
-        self.ttl_feats = self.census
+        self.ttl_feats = self.census + ['homes_sold']
 
         #define intervention + outcome vars. change me as needed 
         self.dataset = self.dataset.dropna()
         
         self.causal_intervention_variable = 'risk_regime'
         self.outcome_variable = 'home_price'
-        self.state = state
+       
 
     def isolate_causal_effect(self, plot=False):
         '''
@@ -268,8 +271,7 @@ class DBLRedfinCensus(DBLRedfin):
         ]
 
         self.report = {
-            'State': self.state, 
-           
+            'Region': self.state, 
             'ATE Estimate': obs, 
             'ATE Confidence Bounds (95 pct)': CI, 
             'P-value': np.count_nonzero(bootstrapped_sample_dist_dbl > 0)/len(bootstrapped_sample_dist_dbl),
@@ -280,8 +282,6 @@ class DBLRedfinCensus(DBLRedfin):
 
             plt.hist(bootstrapped_sample_dist_dbl, bins=20, label='Doubly Robust Estimation')
       
-            
-
             plt.axvline(obs, label=f"Observed ATE: {obs}",color='red')
 
             #plt.axvline(obs_reg_only, label=f"Observed ATE [No DRL Estimation]: {obs_reg_only}",color='orange')
@@ -292,20 +292,61 @@ class DBLRedfinCensus(DBLRedfin):
 
         return self.dataset, self.report
 
-    pass
+    def pairwise_analysis(self):
+        from scipy import stats
+
+        assert 'treatment_effect' in self.dataset.columns
+
+        self.dataset = self.dataset[['zip','PER CAPITA INCOME','TOTAL POPULATION ESTIMATE','homes_sold','treatment_effect','treatment_effect_no_corr']]
+        self.dataset['income_decay'] = self.dataset['PER CAPITA INCOME'] < 0
+        self.dataset['population_decay'] = self.dataset['TOTAL POPULATION ESTIMATE'] < 0
+        self.dataset['marketdemand_decay'] = self.dataset['homes_sold'] < 0
+
+        self.dataset['marginalized'] = self.dataset[['income_decay','population_decay','marketdemand_decay']].sum(axis=1) >= 2
+        
+        obs_sample_marg = self.dataset.loc[self.dataset['marginalized']==True]['treatment_effect']
+        ATE_marg = obs_sample_marg.mean()
+        obs_sample_non_marg = self.dataset.loc[self.dataset['marginalized']==False]['treatment_effect']
+        ATE_non_marg = obs_sample_non_marg.mean()
+
+        bootstrapped_sample_marg = \
+        pd.Series([obs_sample_marg.sample(n=len(obs_sample_marg), replace=True).mean() for _ in np.arange(10000)])
+        bootstrapped_sample_nonmarg = \
+        pd.Series([obs_sample_non_marg.sample(n=len(obs_sample_marg), replace=True).mean() for _ in np.arange(10000)])
+
+        t_statistic,p_value = stats.ttest_ind(bootstrapped_sample_marg,bootstrapped_sample_nonmarg,equal_var=True)
+        self.pairwise_report = {
+            'Region': self.state,
+            'ATE_disadvantaged': ATE_marg, 
+            'ATE_nondisadvantaged': ATE_non_marg, 
+            't_statistic': t_statistic, 
+            'p_value': p_value
+        }
+
+        return self.pairwise_report
     
 if __name__ == '__main__':
+
     states = [
-         'NC','SC','GA','FL','AL','MS','LA','TX'
+        'NC','SC','GA','FL','AL','MS','LA','TX'
     ]
 
     outputs = []
-    for state in states: 
-        dbl = DBLRedfinCensus(state=state)
-        _, re = dbl.isolate_causal_effect()
+    outputsALL = []
+    pairwise = []
+    for msa in states: 
+        dbl = DBLRedfinCensus(query=msa, query_type='state')
+        dd, re = dbl.isolate_causal_effect()
         outputs.append(re)
+        outputsALL.append(dd)
 
-    pd.DataFrame(data=outputs).to_csv('model_w_census.csv')
+        re_pair = dbl.pairwise_analysis()
+        pairwise.append(re_pair)
 
+
+    pd.concat(outputsALL,axis=0).to_csv('outputs/model_w_census_STATEall.csv')
+
+    pd.DataFrame(data=outputs).to_csv('outputs/model_w_census_STATEsigreport.csv')
+    pd.DataFrame(data=pairwise).to_csv('outputs/model_w_census_STATEsigreport_pairwise.csv')
 
         

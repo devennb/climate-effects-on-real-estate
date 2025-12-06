@@ -54,10 +54,16 @@ class DataLoaderCensus(DataLoaderRedfin):
             }
 
         
-    def retrieve_state_data_snapshot(self, state, table_name):
+    def retrieve_state_data_snapshot(self, query, query_type, table_name):
 
-        logger.info(f'Retrieving Combined Dataset for State: {state}')
+        logger.info(f'Retrieving Combined Dataset for Region: {query}')
         assert hasattr(self, 'con')
+        if query_type == 'msa':
+            state = query.split(', ')[-1]
+            query = f"PARENT_METRO_REGION = '{query}'"
+        else: 
+            state = query
+            query = f"STATE_CODE = '{query}'"
         try: 
             census_data = self.retrieve_census_data_by_state(
                 state, 
@@ -75,7 +81,7 @@ class DataLoaderCensus(DataLoaderRedfin):
 
          create table {table_name}_claims as
          with realestate_data as (
-         select * from redfin_dataset where STATE_CODE = '{state}'
+         select * from redfin_dataset where {query}
          )
          select 
             year, 
@@ -108,6 +114,7 @@ class DataLoaderCensus(DataLoaderRedfin):
         ttl = ttl.fillna(0)
 
         ttl['risk_regime'] = ttl['totalLossesZip'] > 0
+        #ttl['is_marginalized'] = ttl['PER CAPITA INCOME'].groupby(['year']).transform(np.mean)
 
         self.con.sql(
         f'''
@@ -121,6 +128,7 @@ class DataLoaderCensus(DataLoaderRedfin):
         )
 
         return ttl
+    
     
     def retrieve_census_data_by_state(self, state, tbl_name):
 
@@ -138,7 +146,7 @@ class DataLoaderCensus(DataLoaderRedfin):
         all_ = []
 
         for year in tqdm(years):
-            print(year)
+            
             for idx, _ in list(enumerate(blocks_it))[:-1]:
 
                 i_start = blocks_it[idx]

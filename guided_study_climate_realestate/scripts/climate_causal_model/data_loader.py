@@ -285,6 +285,7 @@ class DataLoaderRedfin:
             extract('year' from PERIOD_BEGIN) as year, 
             extract('month' from PERIOD_BEGIN) as month,
             substring(REGION,11,6) as zip, 
+            PARENT_METRO_REGION,
             STATE_CODE,
             MEDIAN_SALE_PRICE, 
             MEDIAN_SALE_PRICE_MOM, 
