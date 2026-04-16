@@ -1,21 +1,16 @@
 import warnings
 import pandas as pd 
 import numpy as np 
-import geopandas as gpd 
 from scipy.stats import ranksums
 from sklearn.linear_model import LogisticRegression
-from sklearn.neighbors import NearestNeighbors
-from sklearn.preprocessing import StandardScaler
-import statsmodels.api as sm
 import matplotlib.pyplot as plt
-import requests
-from sklearn.linear_model import LogisticRegression, Lasso
+from scipy import stats
 
 import matplotlib.pyplot as plt 
 from sklearn.linear_model import LinearRegression
 
-from data_loader import DataLoaderRedfin #adjust this later...
-from census_data_loader import DataLoaderCensus
+from climate_causal_model.data_loader import DataLoaderRedfin #adjust this later...
+from climate_causal_model.census_data_loader import DataLoaderCensus
 import warnings
 import logging
 
@@ -28,64 +23,27 @@ class DBLRedfin:
     '''
     Doubly Robust Estimation Framework via Redfin Dataset
     Eval causal effect of hurricanes/flooding disasters (via NFIP claims) on property values (Redfin), controlled for zip-level socioeconomic attributes 
-    Todo: see if this is feasible at the census tract level!
-    Inputs:
-        *state abbreviation: 1 Model per State
-        *window_size: size of the recovery window post disaster (months) to be considered in the risk regime (our treatment, inferred via the claims dataset)
-
     '''
 
-    def __init__(self, state, window_size=1):
+    def __init__(self, dataset, causal_intervention_variable, outcome_variable, ttl_feats):
         '''
         Runs the dataloader to retrieve state-specific dataset for the model (indexed by zip-code,month,year)
         Assigns control/treatment groups via thresholding on claims/losses 
         Adds recovery window into treatment groups
         '''
-
-        logger.info('Instantiating Data: Redfin-Model')
-        dl = DataLoaderRedfin()
-        self.state = state
-        self.dataset = dl.retrieve_state_data_snapshot(state=state)
-        self.dataset = self.dataset.replace('NA',0.0).astype(np.float32)
-
-        logger.info('Assign Treatment Groups')
-        self.dataset['risk_regime'] = self.dataset['totalLossesZip'] > 10000
-        self.dataset = self.dataset.loc[self.dataset['INVENTORY']>20]
-
-        logger.info(f'Setting recovery window: {window_size} post-disaster')
-        self.risk_window = window_size
+        self.dataset = dataset 
+        self.causal_intervention_variable = causal_intervention_variable
+        self.outcome_variable = outcome_variable
+        self.ttl_feats = ttl_feats 
         
-        if self.risk_window > 1:
-            mask = pd.concat([self.dataset.reset_index().groupby(['zip'])['risk_regime'].shift(i).bfill() for i in range(self.risk_window)], axis=1)
-            mask.index = self.dataset.index
-            self.dataset['risk_regime'] = mask.any(axis=1)          
-
-        #retrieve controlled feats
-
-        #socio-demos
-        irs_tax_return_feats = list(self.dataset.columns[:10])
-
-        #housing market
-        housing_market_feats = [
-            'HOMES_SOLD',
-            'PENDING_SALES',
-            'NEW_LISTINGS',
-            'INVENTORY',
-            'SOLD_ABOVE_LIST',
-            'OFF_MARKET_IN_TWO_WEEKS'
-        ]
-
-        self.ttl_feats = irs_tax_return_feats + housing_market_feats
-        logger.info(f"Model Features: {','.join([str(i) for i in self.ttl_feats])}")
-
-        #define intervention + outcome vars. change me as needed 
-        self.causal_intervention_variable = 'risk_regime'
-        self.outcome_variable = 'MEDIAN_SALE_PRICE_MOM'
-
-        logger.info(f'Outcome Variable: {self.outcome_variable}')
 
     def generate_propensity_score(self, class_weight=0.5):
+        '''
+        Propensity Score Model (P(T|X))
+        '''
+
         logger.info('Fitting the treatment model via a logistic regression')
+
         X = self.dataset[self.ttl_feats].values
         T = self.dataset[self.causal_intervention_variable].astype(bool)
         lr = LogisticRegression(
@@ -98,10 +56,12 @@ class DBLRedfin:
 
     def generate_enhanced_propensity_score(self, scale_factor): 
         '''
-        Propensity score correction for imbalanced samples per (@deven add paper citation here)
+        Propensity score correction for imbalanced samples per (@deven add paper citation here). 
+        Important for high-granularity, large datasets with relatively infrequent treatments
         '''
 
         logger.info('Fitting the treatment model via the enhanced propensity scoring methodology')
+
         X = self.dataset[self.ttl_feats].values
         T = self.dataset[self.causal_intervention_variable].astype(bool)
         lr = LinearRegression()
@@ -112,128 +72,38 @@ class DBLRedfin:
 
         self.dataset['propensity_score'] = ps
 
-    def isolate_causal_effect(self, plot=False):
+    def generate_report(self):
         '''
-        Calculates the causal effect (ATE) via doubly robust estimation
+        Spits out report, you must run 'isolate_causal_effect' before invoking this method 
         '''
-        #run the outcome model... 
 
-        logger.info('Fitting the Outcome Models')
-        self.generate_enhanced_propensity_score(scale_factor=0.01)
-
-        X = self.dataset[self.ttl_feats].values
-
-        #outcome modeling via simple linear regression
-        ttl_dataset_0 = self.dataset.loc[self.dataset[self.causal_intervention_variable]==False].drop(columns=[self.causal_intervention_variable])
-        X_0, y_0 = ttl_dataset_0[self.ttl_feats].values, ttl_dataset_0[self.outcome_variable]
-        y_0m = LinearRegression() 
-        y_0m.fit(X_0, y_0)
-        y_0h = y_0m.predict(X)
-
-
-        ttl_dataset_1 = self.dataset.loc[self.dataset[self.causal_intervention_variable]==True].drop(columns=[self.causal_intervention_variable])
-        X_1, y_1 = ttl_dataset_1[self.ttl_feats].values, ttl_dataset_1[self.outcome_variable]
-        y_1m =  LinearRegression() 
-        y_1m.fit(X_1, y_1)
-        y_1h = y_1m.predict(X)
-
-        logger.info('Apply the debiasing correction. Calculating the treatment effects...')
-        self.dataset['y_0'] = y_0h 
-        self.dataset['y_0_corrected'] = self.dataset['y_0'] + ((self.dataset[self.outcome_variable]-y_0h)/(1-self.dataset['propensity_score']))*(self.dataset[self.causal_intervention_variable].astype(np.int32)==0)
-        self.dataset['y_1'] = y_1h 
-        self.dataset['y_1_corrected'] = self.dataset['y_1'] + ((self.dataset[self.outcome_variable]-y_1h)/(self.dataset['propensity_score']))*(self.dataset[self.causal_intervention_variable].astype(np.int32)==1)
-        self.dataset['treatment_effect'] = self.dataset['y_1_corrected']-self.dataset['y_0_corrected']
-        self.dataset['treatment_effect_no_corr'] = self.dataset['y_1']-self.dataset['y_0']
-
-        logger.info('Generate ATE sampling distribution')
-        diffs_dbl = self.dataset['treatment_effect']
-        diffs_reg_only = self.dataset['treatment_effect_no_corr']
-
-        #create sample dist to estimate uncertainty of the ATE val, confidence intervals etc...
-        bootstrapped_sample_dist_dbl = pd.Series([diffs_dbl.sample(n=len(diffs_dbl), replace=True).mean() for _ in np.arange(10000)])
-       
-        obs = diffs_dbl.mean()
-        obs_reg_only = diffs_reg_only.mean()
-        print(f"Average Treatment Effect, Flooding effects on house prices {self.state}: {obs}")
-        CI = [
-            bootstrapped_sample_dist_dbl.quantile(0.025), 
-            bootstrapped_sample_dist_dbl.quantile(0.975)
-        ]
-
-        logger.info('Building output distribution report')
-        self.report = {
-            'State': self.state, 
-            'Recovery Window': self.risk_window,
-            'ATE Estimate': obs, 
-            'ATE Confidence Bounds (95 pct)': CI, 
-            'P-value': np.count_nonzero(bootstrapped_sample_dist_dbl > 0)/len(bootstrapped_sample_dist_dbl),
-            'Significant?': (np.count_nonzero(bootstrapped_sample_dist_dbl > 0)/len(bootstrapped_sample_dist_dbl)) < 0.06
-        }
-
-        if plot:
-
-            plt.hist(bootstrapped_sample_dist_dbl, bins=50, label='Doubly Robust Estimation')
-      
-            plt.title(f'ATE Estimation (Window Size={self.risk_window})')
-
-            plt.axvline(obs, label=f"Observed ATE: {obs}",color='red')
-
-            #plt.axvline(obs_reg_only, label=f"Observed ATE [No DRL Estimation]: {obs_reg_only}",color='orange')
-            plt.axvline(CI[0], label=f"95 pct CI Lower: {CI[0]}",color='red',linestyle='--')
-            plt.axvline(CI[1], label=f"95 pct CI Upper: {CI[1]}",color='red',linestyle='--')
-            plt.legend()
-            plt.show()
-
-        return self.dataset, self.report
+        assert hasattr(self, 'report')
+        return self.report 
     
-class DBLRedfinCensus(DBLRedfin):
-   
-    def __init__(self, query, query_type='state'):
+    def retrieve_dataset(self):
         '''
-        Runs the dataloader to retrieve state-specific dataset for the model (indexed by zip-code,month,year)
-        Assigns control/treatment groups via thresholding on claims/losses 
-        Adds recovery window into treatment groups
+        Spits out dataset for full reference
         '''
-        logger.info('Instantiating Data: Redfin-Model')
 
-        assert query_type in ['msa','state']
-
-        dl = DataLoaderCensus()
-        self.state = query
-        self.dataset = dl.retrieve_state_data_snapshot(query, query_type, table_name=f'{self.state.split(',')[0].replace(' ','')}census').drop_duplicates()
-      
-        self.census = list(dl.census_features.keys())
-
-       # dataset = dataset.copy()
-        feats = self.census + ['homes_sold','home_price']
-        for f in feats: 
-            self.dataset[f] = self.dataset[f].replace(0,0.001)
-            self.dataset[f] = self.dataset.groupby(['zip'])[f].diff() \
-                       / self.dataset.groupby(['zip'])[f].shift(1)
-            self.dataset[f] = self.dataset[f].clip(
-                upper=-3,lower=3
-            )
-
-        self.ttl_feats = self.census + ['homes_sold']
-
-        #define intervention + outcome vars. change me as needed 
-        self.dataset = self.dataset.dropna()
-        
-        self.causal_intervention_variable = 'risk_regime'
-        self.outcome_variable = 'home_price'
-       
+        return self.dataset 
 
     def isolate_causal_effect(self, plot=False):
         '''
         Calculates the causal effect (ATE) via doubly robust estimation
+        (1) calculates the propensity score model (P(T|X))
+        (2) calculates outcome model for both treatment scenarios P(Y|X,T=1),P(Y|X,T=0)
+        (3) combines (1) and (2) to add debiasing factor for P(Y|X,T=1) and P(Y|X,T=0), then calculates the difference btw the two
+        (4) estimates ATE using a non-parametric bootstrapped sampling simulation (E[Y|X,T=1 - Y|X,T=0]) over 10000 runs
         '''
         #run the outcome model... 
 
+        logger.info('Running Propensity Score Model')
         self.generate_enhanced_propensity_score(scale_factor=0.01)
 
         X = self.dataset[self.ttl_feats].values
 
         #outcome modeling via simple linear regression
+        logger.info('Running Outcome Model')
         ttl_dataset_0 = self.dataset.loc[self.dataset[self.causal_intervention_variable]==False].drop(columns=[self.causal_intervention_variable])
         X_0, y_0 = ttl_dataset_0[self.ttl_feats].values, ttl_dataset_0[self.outcome_variable]
         y_0m = LinearRegression() 
@@ -247,7 +117,7 @@ class DBLRedfinCensus(DBLRedfin):
         y_1m.fit(X_1, y_1)
         y_1h = y_1m.predict(X)
 
-
+        logger.info('Calculating Treatment Effects')
         self.dataset['y_0'] = y_0h 
         self.dataset['y_0_corrected'] = self.dataset['y_0'] + ((self.dataset[self.outcome_variable]-y_0h)/(1-self.dataset['propensity_score']))*(self.dataset[self.causal_intervention_variable].astype(np.int32)==0)
         self.dataset['y_1'] = y_1h 
@@ -260,6 +130,7 @@ class DBLRedfinCensus(DBLRedfin):
         diffs_reg_only = self.dataset['treatment_effect_no_corr']
 
         #create sample dist to estimate uncertainty of the ATE val, confidence intervals etc...
+        logger.info('Estimating ATE Sampling Distribution and Building Output Report')
         bootstrapped_sample_dist_dbl = pd.Series([diffs_dbl.sample(n=len(diffs_dbl), replace=True).mean() for _ in np.arange(10000)])
        
         obs = diffs_dbl.mean()
@@ -289,21 +160,68 @@ class DBLRedfinCensus(DBLRedfin):
             plt.axvline(CI[1], label=f"95 pct CI Upper: {CI[1]}",color='red',linestyle='--')
             plt.legend()
             plt.show()
+    
+class DBLRedfinCensus(DBLRedfin):
+   
+    def __init__(self, query, parent_dir, query_type='state'):
+        '''
+        Redfin model using Census attributes as independent variables + NFIP claims as treatment
+        '''
 
-        return self.dataset, self.report
+        logger.info('Instantiating Data: Redfin-Model')
 
-    def pairwise_analysis(self):
-        from scipy import stats
+        assert query_type in ['msa','state']
+
+        dl = DataLoaderCensus(parent_dir=parent_dir)
+        self.state = query
+        self.dataset = dl.retrieve_state_data_snapshot(query, query_type, table_name=f'{self.state.split(',')[0].replace(' ','')}census').drop_duplicates()
+      
+        self.census = list(dl.census_features.keys())
+
+       # dataset = dataset.copy()
+        feats = self.census + ['homes_sold','home_price']
+        for f in feats: 
+            self.dataset[f] = self.dataset[f].replace(0,0.001)
+            self.dataset[f] = self.dataset.groupby(['zip'])[f].diff() \
+                            / self.dataset.groupby(['zip'])[f].shift(1)
+            self.dataset[f] = self.dataset[f].clip(
+                upper=-3,
+                lower=3
+            )
+
+        self.ttl_feats = self.census + ['homes_sold']
+
+        #define intervention + outcome vars. change me as needed 
+        self.dataset = self.dataset.dropna()
+        
+        self.causal_intervention_variable = 'risk_regime'
+        self.outcome_variable = 'home_price'
+
+
+    def pairwise_analysis(self, plot):
+        '''
+        Runs a pairwise analysis of regional treatment effects across growth/decay neighborhoods using a basic socioeconomic index threshold 
+        Must run the causal model before invoking this method
+        '''
 
         assert 'treatment_effect' in self.dataset.columns
 
-        self.dataset = self.dataset[['zip','PER CAPITA INCOME','TOTAL POPULATION ESTIMATE','homes_sold','treatment_effect','treatment_effect_no_corr']]
+        self.dataset = self.dataset[[
+            'zip','PER CAPITA INCOME','TOTAL POPULATION ESTIMATE','homes_sold','treatment_effect','treatment_effect_no_corr', 
+            self.outcome_variable, self.causal_intervention_variable
+        ]]
+
+        logger.info('Calculating socioeconomic partitioning index')
         self.dataset['income_decay'] = self.dataset['PER CAPITA INCOME'] < 0
         self.dataset['population_decay'] = self.dataset['TOTAL POPULATION ESTIMATE'] < 0
         self.dataset['marketdemand_decay'] = self.dataset['homes_sold'] < 0
 
         self.dataset['marginalized'] = self.dataset[['income_decay','population_decay','marketdemand_decay']].sum(axis=1) >= 2
+
         
+        self.dataset.to_csv(f'zcta_results_{self.state}.csv')
+
+        logger.info('Running pairwise simulation and generating report')
         obs_sample_marg = self.dataset.loc[self.dataset['marginalized']==True]['treatment_effect']
         ATE_marg = obs_sample_marg.mean()
         obs_sample_non_marg = self.dataset.loc[self.dataset['marginalized']==False]['treatment_effect']
@@ -323,30 +241,40 @@ class DBLRedfinCensus(DBLRedfin):
             'p_value': p_value
         }
 
+        if plot: 
+            plt.rcParams['figure.figsize']=(15,10)
+            bootstrapped_sample_marg.hist(alpha=0.75,bins=25,label='Disadvantaged Communities')
+            bootstrapped_sample_nonmarg.hist(alpha=0.75,bins=25,label='Growth Communities')
+            plt.title(f'ATE Pairwise Sampling Distributions: {self.state}')
+            plt.xlabel('ATE Sampling Estimates: Flood Disasters x Home Price')
+            plt.axvline(ATE_marg,color='blue',label=f'[Disadvantaged] Estimated ATE: {ATE_marg}')
+            plt.axvline(ATE_non_marg,color='red',label=f'[Growth] Estimated ATE: {ATE_non_marg}')
+            plt.legend()
+            plt.savefig(f'outputs/plots/{self.state}_plot.png')
+            plt.show()
+
+
         return self.pairwise_report
     
-if __name__ == '__main__':
+#if __name__ == '__main__':
 
-    states = [
-        'NC','SC','GA','FL','AL','MS','LA','TX'
-    ]
+ #   states = [
+  #      'Miami, FL', 'New York, NY', 
+   # ]
 
-    outputs = []
-    outputsALL = []
-    pairwise = []
-    for msa in states: 
-        dbl = DBLRedfinCensus(query=msa, query_type='state')
-        dd, re = dbl.isolate_causal_effect()
-        outputs.append(re)
-        outputsALL.append(dd)
+#    outputs = []
+ #   outputsALL = []
+  #  pairwise = []
+   # for msa in states: 
+    #    dbl = DBLRedfinCensus(query=msa, query_type='msa')
+     #   dd, re = dbl.isolate_causal_effect()
+      #  outputs.append(re)
+       # outputsALL.append(dd)
 
-        re_pair = dbl.pairwise_analysis()
-        pairwise.append(re_pair)
+#        re_pair = dbl.pairwise_analysis(plot=True)
+ #       pairwise.append(re_pair)
 
 
-    pd.concat(outputsALL,axis=0).to_csv('outputs/model_w_census_STATEall.csv')
-
-    pd.DataFrame(data=outputs).to_csv('outputs/model_w_census_STATEsigreport.csv')
-    pd.DataFrame(data=pairwise).to_csv('outputs/model_w_census_STATEsigreport_pairwise.csv')
+  
 
         

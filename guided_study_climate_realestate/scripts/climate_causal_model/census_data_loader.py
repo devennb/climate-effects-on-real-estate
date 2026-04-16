@@ -1,6 +1,6 @@
 
-from data_loader import DataLoaderRedfin
-from configs import read_yaml_as_dict
+from climate_causal_model.data_loader import DataLoaderRedfin
+from climate_causal_model.configs import read_yaml_as_dict
 from tqdm import tqdm 
 import pandas as pd
 import requests 
@@ -37,14 +37,19 @@ class DataLoaderCensus(DataLoaderRedfin):
     
     def __init__(
             self, 
+            parent_dir,
             census_features=[],
-            data_config = read_yaml_as_dict()
+            data_config = read_yaml_as_dict(), 
         ):
+
+        '''
+        Instantiates data loader for census/ACS features
+        '''
 
         #first do the standard workflow, initiate db connection
 
-        print(data_config)
-        super().__init__(data_config)
+        logger.info(data_config)
+        super().__init__(parent_dir,data_config)
 
         if len(census_features) == 0: #do all features 
             self.census_features = self.FEATURE_MAP
@@ -55,6 +60,9 @@ class DataLoaderCensus(DataLoaderRedfin):
 
         
     def retrieve_state_data_snapshot(self, query, query_type, table_name):
+        '''
+        Joins NFIP claims dataset with redfin housing market data, based on specified location parameters
+        '''
 
         logger.info(f'Retrieving Combined Dataset for Region: {query}')
         assert hasattr(self, 'con')
@@ -70,8 +78,8 @@ class DataLoaderCensus(DataLoaderRedfin):
                 tbl_name='census'
             )
         except Exception as e:
-            print(e)
-            print('Failed to generate census data due to above reason. Terminating...')
+            logger.warning(e)
+            logger.info('Failed to generate census data due to above reason. Terminating...')
             return  
         
         logger.info('Gathering NFIP Claims/Losses data + Joining on Redfin Real Estate dataset')
@@ -114,7 +122,6 @@ class DataLoaderCensus(DataLoaderRedfin):
         ttl = ttl.fillna(0)
 
         ttl['risk_regime'] = ttl['totalLossesZip'] > 0
-        #ttl['is_marginalized'] = ttl['PER CAPITA INCOME'].groupby(['year']).transform(np.mean)
 
         self.con.sql(
         f'''
@@ -130,8 +137,12 @@ class DataLoaderCensus(DataLoaderRedfin):
         return ttl
     
     
-    def retrieve_census_data_by_state(self, state, tbl_name):
-
+    def retrieve_census_data_by_state(self, state, tbl_name, years=np.arange(2015,2020)):
+        '''
+        Retrieves census data via API, joins with NFIP claims + Redfin housing market data to be used for the model 
+    
+        '''
+        
         zips = self.con.sql(f'''select distinct zip from redfin_dataset where STATE_CODE = '{state}' ;''').df()['zip']
         var_codes = ','.join(list(self.census_features.values()))
         headers = requests.utils.default_headers()
@@ -141,7 +152,7 @@ class DataLoaderCensus(DataLoaderRedfin):
             }
         )
 
-        years = np.arange(2015,2024)
+        #years = np.arange(2015,2024)
         blocks_it = np.arange(0,len(zips),len(zips)//10)
         all_ = []
 
@@ -159,10 +170,9 @@ class DataLoaderCensus(DataLoaderRedfin):
                 usgis_id_block = ','.join(prefix + zips_block)
                 url_block = f'https://api.census.gov/data/{year}/acs/acs5?get=NAME,{var_codes}&ucgid={usgis_id_block}' 
 
-                print(url_block)
+                logger.debug(url_block)
 
                 response = requests.get(url_block, headers=headers)
-                print(response.status_code)
 
                 assert response.status_code == 200
     
@@ -193,17 +203,17 @@ class DataLoaderCensus(DataLoaderRedfin):
 
         return data
     
-if __name__ == '__main__':
-    obj = DataLoaderCensus()
+#if __name__ == '__main__':
+ #   obj = DataLoaderCensus()
 
-    state = 'FL'
-    t = obj.retrieve_state_data_snapshot(
-        state=state, 
-        table_name='fl_dataset'
-    )
-    print(t)
-    print(t['risk_regime'].value_counts())
+  #  state = 'FL'
+   # t = obj.retrieve_state_data_snapshot(
+    #    state=state, 
+     #   table_name='fl_dataset'
+#    )
+ #   print(t)
+  #  print(t['risk_regime'].value_counts())
 
-    pass 
+  #  pass 
 
 
