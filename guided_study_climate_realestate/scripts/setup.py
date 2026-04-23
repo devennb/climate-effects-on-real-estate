@@ -5,10 +5,13 @@ def parse_requirements():
 
 setup(
     name='climate_causal_model',
-    version='0.1.9',
+    version='0.2.87',
     packages=find_packages(),
     package_data={
-        'climate_causal_model':['*','*/*.yaml']
+        'climate_causal_model':[
+            '*',
+            '*/*.yaml',
+        ]
     },
     install_requires=[
           "numpy>1.0",
@@ -16,7 +19,12 @@ setup(
           "duckdb", 
           "scikit-learn",
           "geopandas", 
-          "matplotlib"
+          "matplotlib", 
+          'requests', 
+          'PyYAML', 
+          'tqdm',
+          'statsmodels', 
+          'scipy'
     ],
     python_requires='>=3.9',
     classifiers=[

@@ -7,7 +7,8 @@ import glob
 import duckdb
 import geopandas as gpd 
 import requests
-from configs import read_yaml_as_dict
+from pathlib import Path
+from climate_causal_model.configs import read_yaml_as_dict
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('DATALOADER')
@@ -18,6 +19,7 @@ class DataLoaderRedfin:
     
     def __init__(
             self, 
+            parent_dir,
             data_config = read_yaml_as_dict()
         ): 
 
@@ -32,16 +34,19 @@ class DataLoaderRedfin:
         logger.info('Reading dataset file locations')
         datasets = data_config['datasets']
         for var_name, path in datasets.items(): 
-            setattr(self, var_name, path)
+            setattr(self, var_name, Path(parent_dir + '/' + path))
         
         logger.info('Reading FRED API Endpoint + Key')
         fred_api_params = data_config['apis']
-        for var_name, path in fred_api_params.items(): 
-            setattr(self, var_name, path)
+        for var_name, endpoint in fred_api_params.items(): 
+            setattr(self, var_name, endpoint)
 
         logger.info('Initializing DUCKDB local database')
         try:
-            self.con = self.initialize_ddb(data_config)
+            self.con = self.initialize_ddb(
+                data_config, 
+                parent_dir
+            )
 
         except Exception as e: 
             logger.warning(e) 
@@ -57,64 +62,7 @@ class DataLoaderRedfin:
             state: state abbrev., specifying what US state we're interested in retrieving data for 
         '''
 
-        logger.info(f'Retrieving Combined Dataset for State: {state}')
-        assert hasattr(self, 'con')
-
-        logger.info('Gathering NFIP Claims/Losses data + Joining on Redfin Real Estate dataset')
-        subqueryclaims_re = f'''
-        with realestate_data as (
-        select * from redfin_dataset where STATE_CODE = '{state}'
-        )
-        select *
-        from realestate_data 
-        left join nfip_claims_zip using (zip,month,year)
-        order by zip,year,month
-        ;
-        '''
-
-        logger.info('Gathering Socioeconomic Context Variables')
-        subquery_irs = f'''
-        select * from irs_zip where STATE = '{state}'
-        ;
-        '''
-
-        claims_realestate = self.con.sql(subqueryclaims_re).df()
-        socioeconomic_tax_confounders = self.con.sql(subquery_irs).df() 
-
-        num_rets_feats = [
-            'numberTaxReturns',
-            'elderlyReturns', 
-            'returnsTotalwSalariesWages',
-            'returnsDependentCareCredit', 
-            'returnsEducationCredit'
-        ] 
-        piv=socioeconomic_tax_confounders.pivot(
-            index='zip', columns='adjGrossIncomeTaxBracket', values='numberTaxReturns'
-        ) 
-        piv_norm = piv.div(piv.sum(axis=1),axis=0)
-        grp = socioeconomic_tax_confounders.groupby('zip')[num_rets_feats].sum()
-        grp = grp.div(grp['numberTaxReturns'],axis=0).drop(columns=['numberTaxReturns'])
-        feature_matrix = pd.concat((piv_norm,grp),axis=1)
-
-        all_data = feature_matrix.merge(
-            claims_realestate.set_index('zip'), 
-            how='inner', 
-            on=['zip']
-        )
-
-        logger.info('Building Combined Dataset with Preliminary Treatment Assignment')
-        all_data = all_data\
-            .reset_index()\
-            .sort_values(by=['zip','year','month'])\
-            .set_index(['zip','year','month'])\
-            .drop(columns=['STATE_CODE','state'])\
-            .fillna(0)\
-            .replace('NA',0.0)\
-            .astype(np.float32)
-        
-        all_data['risk_regime'] = all_data['totalLossesZip'] > 0
-
-        return all_data
+        raise NotImplementedError()
 
         
     def retrieve_macroeconomic_data(self):
@@ -171,7 +119,7 @@ class DataLoaderRedfin:
         return cct
     
 
-    def initialize_ddb(self, config):
+    def initialize_ddb(self, config, parent_dir):
 
         '''
         Retrieves static files, processes them into a duckdb database (NFIP/IRS/Redfin)
@@ -180,11 +128,9 @@ class DataLoaderRedfin:
         Returns a database connection to the said duckdb database
         '''
 
-        self.DUCKDB_location = config['databases']['duckdb_location_redfin']
+        self.DUCKDB_location = Path(parent_dir + '/' + config['databases']['duckdb_location_redfin'])
 
         logger.info(f'Building local database at {self.DUCKDB_location}')
-        if os.path.exists(self.DUCKDB_location): 
-            return duckdb.connect(self.DUCKDB_location)
             
         base_query = '''
         drop table if exists nfip_claims
@@ -218,7 +164,7 @@ class DataLoaderRedfin:
             censusTract, 
             latitude, 
             longitude
-        from read_csv('{claims_data_path}', strict_mode=False)
+        from read_csv('{claims_data_path}')
         ;
 
         drop table if exists nfip_claims_zip 
@@ -241,42 +187,6 @@ class DataLoaderRedfin:
         order by 5 desc
         ;
 
-        drop table if exists irs_zip
-        ;
-
-        create table irs_zip as 
-        select 
-            STATE, 
-            ZIPCODE as zip, 
-            AGI_STUB as adjGrossIncomeTaxBracket,
-            N1 as numberTaxReturns, 
-            MARS1 as singleStatusTotalReturns, 
-            MARS2 as marriedStatusTotalReturns, 
-            MARS4 as HoHTotalReturns, 
-            N2 as totalIndividuals,
-            VITA as volunteerAssistedReturns, 
-            ELDERLY as elderlyReturns, 
-            A00100 as adjustedGrossIncome, 
-            A02650 as totalIncome, 
-            N00200 as returnsTotalwSalariesWages, 
-            N00300 as returnsTotalTaxableInterest, 
-            A00300 as taxableInterestAmt,
-            SCHF   as returnsTotalFarm, 
-            A18450 as stateLocalSalesTaxTotal, 
-            N18500 as realEstateTaxTotal, 
-            N18800 as returnsTotalPersonalPropertyTax, 
-            A18800 as propertyTaxAmtTotal, 
-            N19300 as returnsTotalMortgageInterestPaid, 
-            A19300 as mortgageInterestPaidTotal,
-            N07225 as returnsDependentCareCredit, 
-            A07225 as dependentCareCreditTotal, 
-            N07230 as returnsEducationCredit, 
-            A07230 as educationCreditTotal, 
-            N85770 as returnsPremiumsCredit, ---aids in offsetting health insurance premiums
-            A85770 as premiumsCreditTotal, 
-        from read_csv('{irs_data_path}', strict_mode=False)
-        ;
-    
         drop table if exists redfin_dataset
         ;
 
@@ -285,6 +195,7 @@ class DataLoaderRedfin:
             extract('year' from PERIOD_BEGIN) as year, 
             extract('month' from PERIOD_BEGIN) as month,
             substring(REGION,11,6) as zip, 
+            PARENT_METRO_REGION,
             STATE_CODE,
             MEDIAN_SALE_PRICE, 
             MEDIAN_SALE_PRICE_MOM, 
@@ -311,8 +222,6 @@ class DataLoaderRedfin:
             base_query.format(
                 claims_data_path=self.claims_data_path,
                 redfin_data_path=self.redfin_data_path, 
-                irs_data_path=self.irs_data_path, 
-                zip_geos_pd=self.zip_geos_pd
             )
         )
         return con
@@ -320,7 +229,7 @@ class DataLoaderRedfin:
 class DataLoaderZillow(DataLoaderRedfin):
 
     '''
-    DEPRECATED: use the redfin data loader instead 
+    DEPRECATED: use the redfin data loader instead. This will not work
     Keeping as reference 
     Inherits from the redfin data loader class 
     '''
@@ -411,7 +320,7 @@ class DataLoaderZillow(DataLoaderRedfin):
             censusTract, 
             latitude, 
             longitude
-        from read_csv('{claims_data_path}', strict_mode=False)
+        from read_csv('{claims_data_path}')
         ;
 
         drop table if exists nfip_claims_zip 
@@ -465,7 +374,7 @@ class DataLoaderZillow(DataLoaderRedfin):
             A07230 as educationCreditTotal, 
             N85770 as returnsPremiumsCredit, ---aids in offsetting health insurance premiums
             A85770 as premiumsCreditTotal, 
-        from read_csv('{irs_data_path}', strict_mode=False)
+        from read_csv('{irs_data_path}')
         ;
     
         drop table if exists zillow_home_prices

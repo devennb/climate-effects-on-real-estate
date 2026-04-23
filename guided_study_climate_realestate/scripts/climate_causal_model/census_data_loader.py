@@ -1,0 +1,219 @@
+
+from climate_causal_model.data_loader import DataLoaderRedfin
+from climate_causal_model.configs import read_yaml_as_dict
+from tqdm import tqdm 
+import pandas as pd
+import requests 
+import logging 
+import numpy as np 
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger('CENSUSDATALOADER')
+
+class DataLoaderCensus(DataLoaderRedfin):
+
+    FEATURE_MAP = {
+        'TOTAL POPULATION ESTIMATE': 'B01001_001E', 
+        'POPULATION W': 'B01001A_001E',
+        'POPULATION B': 'B01001B_001E',
+        'POPULATION AAPI': 'B01001D_001E',
+        'POPULATION H': 'B01001I_001E',
+        'MEDIAN_AGE': 'B01002_001E',
+        'PER CAPITA INCOME': 'B19301_001E',
+        'PER CAPITA INCOME W': 'B19301A_001E',
+        'PER CAPITA INCOME B': 'B19301B_001E',
+        'PER CAPITA INCOME AAPI': 'B19301D_001E',
+        'PER CAPITA INCOME H': 'B19301I_001E',
+        'PER CAPITA INCOME A15-24': 'B19049_002E',
+        'PER CAPITA INCOME A25-44': 'B19049_003E',
+        'PER CAPITA INCOME A45-64': 'B19049_004E',
+        'PER CAPITA INCOME A65+': 'B19049_005E',
+        'TOTAL HH POP': 'B07013_001E',
+        'SAME H 1 YR':'B07013_002E',
+        'SAME STATE':'B07013_004E',
+        'DIFFERENT STATE':'B07013_013E',
+        'ABROAD': 'B07013_015E'
+    }
+    
+    def __init__(
+            self, 
+            parent_dir,
+            census_features=[],
+            data_config = read_yaml_as_dict(), 
+        ):
+
+        '''
+        Instantiates data loader for census/ACS features
+        '''
+
+        #first do the standard workflow, initiate db connection
+
+        logger.info(data_config)
+        super().__init__(parent_dir,data_config)
+
+        if len(census_features) == 0: #do all features 
+            self.census_features = self.FEATURE_MAP
+        else:
+            self.census_features = {
+                i:j for i,j in self.FEATURE_MAP.items() if j in census_features
+            }
+
+        
+    def retrieve_state_data_snapshot(self, query, query_type, table_name):
+        '''
+        Joins NFIP claims dataset with redfin housing market data, based on specified location parameters
+        '''
+
+        logger.info(f'Retrieving Combined Dataset for Region: {query}')
+        assert hasattr(self, 'con')
+        if query_type == 'msa':
+            state = query.split(', ')[-1]
+            query = f"PARENT_METRO_REGION = '{query}'"
+        else: 
+            state = query
+            query = f"STATE_CODE = '{query}'"
+        try: 
+            census_data = self.retrieve_census_data_by_state(
+                state, 
+                tbl_name='census'
+            )
+        except Exception as e:
+            logger.warning(e)
+            logger.info('Failed to generate census data due to above reason. Terminating...')
+            return  
+        
+        logger.info('Gathering NFIP Claims/Losses data + Joining on Redfin Real Estate dataset')
+        subqueryclaims_re = f'''
+         drop table if exists {table_name}_claims
+         ;
+
+         create table {table_name}_claims as
+         with realestate_data as (
+         select * from redfin_dataset where {query}
+         )
+         select 
+            year, 
+            zip::INT as zip, 
+            STATE_CODE, 
+            avg(MEDIAN_SALE_PRICE::DOUBLE) as home_price, 
+            avg(HOMES_SOLD::DOUBLE) as homes_sold,
+            sum(claimCounts) as claimCounts, 
+            sum(numEvents) as numEvents, 
+            sum(totalClaimZip) as totalClaimZip, 
+            sum(totalLossesZip) as totalLossesZip
+         from realestate_data 
+         left join nfip_claims_zip using (zip,month,year)
+         where 
+            MEDIAN_SALE_PRICE <> 'NA'
+         group by 1,2,3
+         order by zip,year
+         ;
+
+         select * from {table_name}_claims
+        ;
+        '''
+
+        claims_realestate = self.con.sql(subqueryclaims_re).df()
+
+        ttl = claims_realestate.merge(
+            census_data, how='inner', on=['year', 'zip']
+        )
+
+        ttl = ttl.fillna(0)
+
+        ttl['risk_regime'] = ttl['totalLossesZip'] > 0
+
+        self.con.sql(
+        f'''
+        drop table if exists {table_name}
+        ;
+
+        create table {table_name} as 
+        select * from ttl
+        ;
+        '''
+        )
+
+        return ttl
+    
+    
+    def retrieve_census_data_by_state(self, state, tbl_name, years=np.arange(2015,2020)):
+        '''
+        Retrieves census data via API, joins with NFIP claims + Redfin housing market data to be used for the model 
+    
+        '''
+        
+        zips = self.con.sql(f'''select distinct zip from redfin_dataset where STATE_CODE = '{state}' ;''').df()['zip']
+        var_codes = ','.join(list(self.census_features.values()))
+        headers = requests.utils.default_headers()
+        headers.update(
+            {
+                'User-Agent': 'PostmanRuntime/7.43.4',
+            }
+        )
+
+        #years = np.arange(2015,2024)
+        blocks_it = np.arange(0,len(zips),len(zips)//10)
+        all_ = []
+
+        for year in tqdm(years):
+            
+            for idx, _ in list(enumerate(blocks_it))[:-1]:
+
+                i_start = blocks_it[idx]
+                i_end = blocks_it[idx+1]
+
+                zips_block = zips.loc[i_start:i_end]
+                if year <= 2020: prefix = '8600000US'
+                else: prefix = '860Z200US'
+
+                usgis_id_block = ','.join(prefix + zips_block)
+                url_block = f'https://api.census.gov/data/{year}/acs/acs5?get=NAME,{var_codes}&ucgid={usgis_id_block}' 
+
+                logger.debug(url_block)
+
+                response = requests.get(url_block, headers=headers)
+
+                assert response.status_code == 200
+    
+                data = response.json() 
+
+                values = data[1:]
+                columns = ['ZCTA'] + list(self.census_features.keys()) + ['ucgid']
+                tbl = pd.DataFrame(data=values,columns=columns)
+                tbl['year'] = int(year)
+                tbl['zip']=tbl['ZCTA'].str.strip('ZCTA5 ')
+                tbl = tbl.drop(columns=['ucgid','ZCTA'])
+                tbl = tbl.astype(np.float64)
+                all_.append(tbl)
+
+        data = pd.concat(all_)
+
+        #option to save data as csv? 
+        self.con.sql(
+        f'''
+        drop table if exists {tbl_name}
+        ;
+
+        create table {tbl_name} as 
+        select * from data
+        ;
+        '''
+        )
+
+        return data
+    
+#if __name__ == '__main__':
+ #   obj = DataLoaderCensus()
+
+  #  state = 'FL'
+   # t = obj.retrieve_state_data_snapshot(
+    #    state=state, 
+     #   table_name='fl_dataset'
+#    )
+ #   print(t)
+  #  print(t['risk_regime'].value_counts())
+
+  #  pass 
+
+
